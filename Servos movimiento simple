@@ -2,18 +2,25 @@
 #include <avr/io.h>
 #include <util/delay.h>
 
+//NOTAS:
+//TIMERS: Basicamente los timers son contadores internos que cambian 
+//cada vez que reciven un pulso. Este tiene un tope que es 65,535 (16 bits) pero para poder
+//los servos tienen una frecuencia fija de 50Hz o (20ms)
+
+//MODO 14 O FAST PWM CON TOPE: Es un modo que nos deja definir el numero maximo que cuenta
+//ICR1 -->  39,999 SEGUN FORMULA DE DATASHEET
+
 void configurar_servos() {
 	
 	DDRB |= (1 << DDB5) | (1 << DDB6);
 
-	// 2. Configurar Timer 1 para Fast PWM (Modo 14)
-	// Agregamos COM1B1 para que el segundo canal funcione
+//DEFINE como los pines se conectan con el timer 
+//WGM11 -->activar modo 14 
 	TCCR1A = (1 << COM1A1) | (1 << COM1B1) | (1 << WGM11);
-	
-	// WGM13 y WGM12 para Modo 14, CS11 para Prescaler de 8
+
 	TCCR1B = (1 << WGM13) | (1 << WGM12) | (1 << CS11);
 
-	// 3. Definir el ciclo de 20ms (Frecuencia de 50Hz)
+
 	ICR1 = 39999;
 }
 
@@ -21,12 +28,12 @@ int main(void) {
 	configurar_servos();
 	
 	while (1) {
-		// Mover ambos servos a una posición 
-		OCR1A = 2000; // Servo en Pin 11
-		OCR1B = 2000; // Servo en Pin 12
+
+		OCR1A = 2000; 
+		OCR1B = 2000; 
 		_delay_ms(1000);
 
-		// Mover ambos servos a otra posición 
+
 		OCR1A = 4000;
 		OCR1B = 4000;
 		_delay_ms(1000);
