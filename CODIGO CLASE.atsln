@@ -1,22 +1,303 @@
 ﻿
-Microsoft Visual Studio Solution File, Format Version 12.00
-# Atmel Studio Solution File, Format Version 11.00
-VisualStudioVersion = 14.0.23107.0
-MinimumVisualStudioVersion = 10.0.40219.1
-Project("{54F91283-7BC4-4236-8FF9-10F437C3AD48}") = "CODIGO CLASE", "CODIGO CLASE\CODIGO CLASE.cproj", "{2285C48D-296E-43FD-A7B6-69885F64CFFD}"
-EndProject
-Global
-	GlobalSection(SolutionConfigurationPlatforms) = preSolution
-		Debug|AVR = Debug|AVR
-		Release|AVR = Release|AVR
-	EndGlobalSection
-	GlobalSection(ProjectConfigurationPlatforms) = postSolution
-		{2285C48D-296E-43FD-A7B6-69885F64CFFD}.Debug|AVR.ActiveCfg = Debug|AVR
-		{2285C48D-296E-43FD-A7B6-69885F64CFFD}.Debug|AVR.Build.0 = Debug|AVR
-		{2285C48D-296E-43FD-A7B6-69885F64CFFD}.Release|AVR.ActiveCfg = Release|AVR
-		{2285C48D-296E-43FD-A7B6-69885F64CFFD}.Release|AVR.Build.0 = Release|AVR
-	EndGlobalSection
-	GlobalSection(SolutionProperties) = preSolution
-		HideSolutionNode = FALSE
-	EndGlobalSection
-EndGlobal
+#define F_CPU 16000000UL
+#include <avr/io.h>
+#include <util/delay.h>
+#include <stdint.h>
+#include <avr/interrupt.h>
+#include <stdio.h>
+#include <math.h>
+
+#define BAUD_RATE 9600
+#define MYUBRR ((F_CPU/16/BAUD_RATE)-1)
+
+int16_t ax,ay,az,t,gx,gy,gz;
+float Tp;
+char contador =0;
+uint8_t BUFFER[14];
+
+
+//COMUNICACION SERIAL (USART)
+
+//FUNCION ISR: ACTIVA UN MECANISMO DE INTERRUPCION ALZANDO UNA BANDERA (PONIENDO EN 1 EL PIN RXC0), EN EL REGISTRO CUANDO SE ENVIA UN DATO 
+ISR(USART0_RX_vect) {
+	//while (!(UCSR0A & (1 << RXC0)));
+	unsigned char data =  UDR0;
+	PORTB = contador;
+	PORTC = data;
+	contador++;
+}
+//888888888888888888888888888888888888888888888888888888888888888888888888888888888888888
+//FUNCION INIT USART: INICIALIZA LOS REGISTROS PARA MANDAR Y RECIBIR INFORMACION EN EL PROTOCOLO DE INFORMACION 
+void USART_Init(unsigned int baud) {
+
+	UBRR0H = (unsigned char)(baud >> 8);
+	UBRR0L = (unsigned char)baud;
+	UCSR0B = (1 << TXEN0) | (1 << RXEN0) | (1 << RXCIE0); //BANDERA PARA ENVIAR/ RECIBIR Y ACTIVAR ISR
+	UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);  //DEFINEN EL TAMAÑO DE LOS REGISTROS
+
+}
+//888888888888888888888888888888888888888888888888888888888888888888888888888888888888888
+
+//CUANDO EL REGISTRO ESTE LISTO PARA RECIBIR UN DATO SE ENVIA INFORMACION AL REGISTRO UDR0.
+
+void USART_Transmit(unsigned char data) {
+
+	while (!(UCSR0A & (1 << UDRE0))); //UDRE0 = 1 --> REGISTRO UDR0 VACIO
+	UDR0 = data;
+}
+//888888888888888888888888888888888888888888888888888888888888888888888888888888888888888
+
+//Descompone el texto para que el registro UDR0 (de capacidad limitada a 1 byte) pueda procesarlo sin 
+//desbordamiento, asegurando la integridad del mensaje mediante un retardo de 1ms entre caracteres.
+
+void envia_mess(const char *s){
+
+	while (*s) {
+		USART_Transmit(*s++);
+		_delay_ms(1);
+	}
+}
+//8888888888888888888888888888888888888888888888888888888888888888888888888888888888888888
+// ================================ I2C (master) =========================================
+
+#define SCL_CLOCK 100000                            // Define la frecuencia del reloj I2C a 100 kHz (Modo Estándar)
+
+// INICIALIZA PARÁMETROS PARA LA COMUNICACIÓN I2C (TWI)
+void i2c_init(void) {
+	TWSR = 0;                                       // Configura el Prescaler en 1 (bits de estado TWPS0 y TWPS1 en 0)
+	TWBR = ((F_CPU/SCL_CLOCK)-16)/2;                // Calcula el valor del registro de tasa de bits para los 100 kHz
+	TWCR = (1 << TWEN);                             // Activa físicamente el módulo TWI/I2C habilitando sus funciones
+}
+
+// FUNCIÓN START: GENERA LA CONDICIÓN DE INICIO Y ENVÍA LA DIRECCIÓN DEL SENSOR CON LA OPERACIÓN (R/W)
+uint8_t i2c_start(uint8_t address_rw) {
+	
+	TWCR = (1 << TWINT) | (1 << TWSTA) | (1 << TWEN); // Borra bandera de interrupción, genera START y habilita el I2C
+	while (!(TWCR & (1 << TWINT))) {;}              // Espera por hardware (bucle) hasta que el START sea transmitido
+
+	TWDR = address_rw;                              // Carga la dirección del sensor esclavo más el bit de Lectura/Escritura
+	TWCR = (1 << TWINT) | (1 << TWEN);              // Borra la bandera para iniciar la transmisión física de la dirección
+	while (!(TWCR & (1 << TWINT))) {;}              // Espera hasta que el sensor esclavo reciba el dato y mande el ACK/NACK
+	return (TWSR & 0xF8);                           // Aplica máscara para leer solo los bits de estado y verificar errores
+}
+
+// FUNCIÓN STOP: GENERA LA CONDICIÓN DE PARADA PARA LIBERAR EL BUS
+void i2c_stop(void) {
+	TWCR = (1 << TWINT) | (1 << TWEN) | (1 << TWSTO); // Borra bandera, habilita módulo y ordena generar la condición de STOP
+	while (TWCR & (1 << TWSTO));                    // Espera a que el hardware complete el STOP y libere las líneas físicas
+}
+
+//FUNCION W: QUE PASA UN DATO AL REGISTRO DE DESPLAZAMIENTO PARA POSTERIORMENTE USARSE
+
+uint8_t i2c_write(uint8_t dato) {
+
+	uint8_t code=0;
+	TWDR = dato;
+	TWCR = (1 << TWINT) | (1 << TWEN);
+	while (!(TWCR & (1 << TWINT)));
+	code= (TWSR & 0xF8);
+	return code;
+}
+
+
+//FUNCION A: EL CABLE BAJA EL VOLTAJE PARA PERMITIR EL PASO DE MÁS DATOS 
+
+uint8_t i2c_read_ack(void) {
+	TWCR = (1 << TWINT) | (1 << TWEN) | (1 << TWEA);
+	while (!(TWCR & (1 << TWINT))) {;}
+	return TWDR;
+}
+
+
+//FUNCION N: EL CABLE SUBE EL VOLTAJE PARA NO PERMITIR EL PASO DE MÁS DATOS
+
+uint8_t i2c_read_nack(void) {
+	TWCR = (1 << TWINT) | (1 << TWEN);
+	while (!(TWCR & (1 << TWINT))) {;}
+	return TWDR;
+}
+
+//8888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888
+//======================================== PWM ==========================================
+void PWM_init(void) {
+	// Timer1 ? PB5(OC1A) elevador, PB6(OC1B) alerón der, PB7(OC1C) alerón izq
+	DDRB |= (1 << PB5) | (1 << PB6) | (1 << PB7);   // pines como salida
+	TCCR1A = (1 << COM1A1) | (1 << COM1A0)            // PWM no invertido OC1A
+	| (1 << COM1B1) | (1 << COM1B0)            // PWM no invertido OC1B
+	| (1 << COM1C1) | (1 << COM1C0)            // PWM no invertido OC1C
+	| (1 << WGM11);                            // Fast PWM 16 bits
+	TCCR1B = (1 << WGM13) | (1 << WGM12)             // Fast PWM ICR1 como TOP
+	| (1 << CS11);                             // prescaler 8
+	ICR1 = 40000;                                     // periodo 20ms ? 50Hz
+
+	// Timer3 ? PE3(OC3A) timón
+	DDRE |= (1 << PE3);                               // pin como salida
+	TCCR3A = (1 << COM3A1) | (1 << COM3A0)            // PWM no invertido OC3A
+	| (1 << WGM31);                            // Fast PWM 16 bits
+	TCCR3B = (1 << WGM33) | (1 << WGM32)             // Fast PWM ICR3 como TOP
+	| (1 << CS31);                             // prescaler 8
+	ICR3 = 40000;                                     // periodo 20ms ? 50Hz
+
+	// posición inicial centro (1.5ms)
+	OCR1A = 3000;                                     // elevador centro
+	OCR1B = 3000;                                     // alerón derecho centro
+	OCR1C = 3000;                                     // alerón izquierdo centro
+	OCR3A = 3000;                                     // timón centro
+}
+//888888888888888888888888888888888888888888888888888888888888888888888888888888888888888
+// ================================= MPU6050 ============================================
+	/*
+
+//DESPIERTA EL SENSOR Y CONFIGURA LOS REGISTROS DE LECTURA Y ESCRITURA DEL DATO ASI COMO OTROS IMPORTANTES (CONFIG, X_OUT)
+	MPU-6000 and MPU-6050
+	Register Map and Descriptions
+	Revision 4.2
+	*/
+	#define MPU6050_ADDR       0x68
+	#define MPU6050_ADDR_W     ((MPU6050_ADDR << 1) | 0)
+	#define MPU6050_ADDR_R     ((MPU6050_ADDR << 1) | 1)
+	#define REG_PWR_MGMT_1     0x6B
+	#define REG_SMPLRT_DIV     0x19
+	#define REG_CONFIG         0x1A
+	#define REG_GYRO_CONFIG    0x1B
+	#define REG_ACCEL_CONFIG   0x1C  
+	#define REG_ACCEL_XOUT_H   0x3B
+
+//FUNCION WR: USA LA FUNCION WRITE PARA MANDAR VALORES DE DIRECCION DE MEMORIA, REG Y VAL AL REGISTRO DE DESPLAZAMIENTO
+void mpu6050_write_reg(uint8_t reg, uint8_t val) {
+	
+	i2c_start(MPU6050_ADDR_W);
+	i2c_write(reg);
+	i2c_write(val);
+	i2c_stop();
+}
+
+//FUNCION RR: LEE LOS DATOS X,Y,Z DEL GIROSCOPIO, ACELERADOR Y TEMPERATURA (2 BYTES POR CADA UNO)
+
+void mpu6050_read_regs(uint8_t start_reg) {
+
+//PRIMERO SE USA LA FUNCION WRITE PARA SABER QUE DATOS ESTAN LLEGANDO
+	
+	#define LEN 14
+	i2c_start(MPU6050_ADDR_W);
+	i2c_write(start_reg);
+	
+	i2c_start(MPU6050_ADDR_R);
+	for (uint8_t i = 0; i < LEN; i++) {
+		if (i == (LEN - 1)){BUFFER[i] = i2c_read_nack();}
+		   else{BUFFER[i] = i2c_read_ack();}
+	}
+	i2c_stop();
+}
+
+//FUNCION IZ: DESPIERTA EL SENSOR Y CONFIGURA LA SENSIBILIDAD DE CADA FUNCION 
+
+void MPU6050_INICIALIZA(void) {
+	
+	_delay_ms(100);
+	mpu6050_write_reg(REG_PWR_MGMT_1, 0x00);
+	_delay_ms(10);
+	mpu6050_write_reg(REG_CONFIG, 0x03);      // DLPF  44Hz   XXXX AAA BBB
+	mpu6050_write_reg(REG_SMPLRT_DIV, 0x04);  // 1kHz/(1+4)=200Hz 
+	mpu6050_write_reg(REG_GYRO_CONFIG, 0x00); //  250  /s
+	mpu6050_write_reg(REG_ACCEL_CONFIG, 0x10);// 0000 0000  2 g  ---- 000  10   000  8 g
+}
+
+
+int16_t UNION(uint8_t hi, uint8_t lo) {
+	return (int16_t)((hi << 8) | lo);//Une parte alta y baja en una palabra de 16 bits
+}
+
+//888888888888888888888888888888888888888888888888888888888888888888888888888888888888888
+
+//FUNCION S: CONVERTIR DECIMALES A TEXTO 
+
+void SEND_INT32(int16_t valor) {
+	
+	char buf[12];
+	sprintf(buf,"%d",valor);
+	envia_mess(buf);
+}
+
+//8888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888
+//FUNCION ENVIA: USA LA FUNCION DE ENVIAR PARA MANDAR CADA DATO DEL SENSOR
+
+void envia_datos_raw(){
+	char buf[12];
+	envia_mess("AX:");
+	SEND_INT32(ax);
+	envia_mess(" AY:");
+	SEND_INT32(ay);
+	envia_mess(" AZ:");
+	SEND_INT32(az);
+
+	envia_mess("\r\nGX:");
+	SEND_INT32(gx);
+	envia_mess(" GY:");
+	SEND_INT32(gy);
+	envia_mess(" GZ:");
+	SEND_INT32(gz);
+	
+	sprintf(buf," T: %.2f",Tp);
+	envia_mess(buf);
+	
+	envia_mess(" C\r\n");
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void calcular_angulos(int16_t raw_x, int16_t raw_y, int16_t raw_z, float *pitch, float *roll) {
+
+	float ax_g = raw_x / 4096.0;
+	float ay_g = raw_y / 4096.0;
+	float az_g = raw_z / 4096.0;
+
+
+	*pitch = atan2(ax_g, sqrt(ay_g * ay_g + az_g * az_g)) * (180.0 / M_PI);
+
+	*roll = atan2(ay_g, az_g) * (180.0 / M_PI);
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+int main(void)
+{
+	i2c_init();
+	USART_Init(MYUBRR);
+	DDRB = 255;
+	envia_mess("INICIANDO IMU XX.....\n\r");
+	MPU6050_INICIALIZA();
+	sei();
+	envia_mess("SISTEMAS EMBEBIDOS 2026 \n\r");
+
+	float angulo_pitch = 0;
+	float angulo_roll = 0;
+	char buf_angulos[50]; // Buffer para formatear el texto de salida
+
+	while (1) {
+		// 1. Lectura de registros crudos
+		mpu6050_read_regs(REG_ACCEL_XOUT_H);
+
+		ax = UNION(BUFFER[0],  BUFFER[1]);
+		ay = UNION(BUFFER[2],  BUFFER[3]);
+		az = UNION(BUFFER[4],  BUFFER[5]);
+		t  = UNION(BUFFER[6],  BUFFER[7]);
+		gx = UNION(BUFFER[8],  BUFFER[9]);
+		gy = UNION(BUFFER[10], BUFFER[11]);
+		gz = UNION(BUFFER[12], BUFFER[13]);
+
+
+		Tp = (float)(t / 340.0) + 36.53;
+
+
+		calcular_angulos(ax, ay, az, &angulo_pitch, &angulo_roll);
+
+		envia_datos_raw("r\n");
+
+
+		sprintf(buf_angulos, "PITCH: %.2f | ROLL: %.2f\r\n", angulo_pitch, angulo_roll);
+		envia_mess(buf_angulos);
+
+		_delay_ms(1000);
+	}
+	return 0;
+}
